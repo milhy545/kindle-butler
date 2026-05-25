@@ -1,0 +1,621 @@
+import os
+import json
+from typing import Dict, Optional
+from google import genai
+
+class AIClient:
+    """
+    Handles interactions with LLMs for metadata normalization.
+    """
+    
+    def __init__(self, api_key: Optional[str] = None):
+        self.api_key = api_key or os.environ.get("GEMINI_API_KEY")
+        if self.api_key:
+            self.client = genai.Client(api_key=self.api_key)
+            self.model_name = 'gemini-1.5-flash'
+        else:
+            self.client = None
+
+    def normalize_metadata(self, raw_author: str, raw_title: str) -> Dict[str, str]:
+        """
+        Uses AI to normalize author and title into a standard format.
+        """
+        if not self.client:
+            return {"author": raw_author, "title": raw_title}
+            
+        prompt = f"""
+        Analyze the following ebook metadata and normalize it. 
+        Format author as 'First Last'.
+        Clean up titles from messy filename patterns (remove .azw3, .pdf extensions, etc).
+        
+        Raw Author: {raw_author}
+        Raw Title: {raw_title}
+        
+        Return JSON format ONLY: {{"author": "Normalized Author", "title": "Normalized Title"}}
+        """
+        
+        try:
+            response = self.client.models.generate_content(
+                model=self.model_name,
+                contents=prompt
+            )
+            text = response.text.strip()
+            # Handle potential markdown formatting in response
+            if "```json" in text:
+                text = text.split("```json")[1].split("```")[0].strip()
+            elif "```" in text:
+                text = text.split("```")[1].split("```")[0].strip()
+                
+            return json.loads(text)
+        except Exception:
+            return {"author": raw_author, "title": raw_title}
+
+    def enhance_content(self, text: str, target_lang: str = "cs") -> str:
+        """
+        Enhances technical text: translates, converts lists/tables to narrative prose,
+        and appends original data at the end.
+        """
+        if not self.client:
+            return text
+
+        system_instruction = f"""Jsi profesionální technický redaktor a překladatel.
+Tvým úkolem je vylepšit technickou dokumentaci pro pohodlné čtení na E-Ink displeji (Kindle).
+Cílový jazyk: {target_lang}
+
+Pravidla:
+1. Přelož text přesně do cílového jazyka (pokud už v něm není).
+2. Převeď odrážky, tabulky a technické seznamy do plynulých, čtivých odstavců (narrative prose), které se čtou jako příběh.
+3. Nesmíš ztratit ŽÁDNÁ technická data.
+4. Na konec dokumentu přidej nadpis (např. 'Původní technická data' v cílovém jazyce) a připoj původní strukturovaná data, aby si je čtenář mohl dohledat.
+5. Vrať POUZE výsledný text ve formátu Markdown. Žádné úvodní ani závěrečné fráze mimo samotný text."""
+
+        try:
+            response = self.client.models.generate_content(
+                model=self.model_name,
+                contents=text,
+                config=genai.types.GenerateContentConfig(
+                    system_instruction=system_instruction,
+                    temperature=0.3
+                )
+            )
+            return response.text.strip()
+        except Exception:
+            return text
+import warnings
+from bs4 import BeautifulSoup, XMLParsedAsHTMLWarning
+warnings.filterwarnings('ignore', category=XMLParsedAsHTMLWarning)
+
+import ebooklib
+from ebooklib import epub
+from app.ai_client import AIClient
+from pathlib import Path
+import markdown
+
+import uuid
+
+class ContentProcessor:
+    def __init__(self, ai_client: AIClient):
+        self.ai_client = ai_client
+
+    def _fix_ebooklib_toc_uids(self, toc):
+        """
+        Fixes a known bug in ebooklib where read_epub sets Link.uid to None.
+        This causes lxml to crash during write_epub.
+        """
+        for item in toc:
+            if isinstance(item, epub.Link):
+                if item.uid is None:
+                    # Generate a unique ID if it's missing to satisfy lxml writing
+                    item.uid = str(uuid.uuid4())
+            elif isinstance(item, tuple) and len(item) == 2:
+                # Handle nested sections (Section, [Links...])
+                if isinstance(item[0], epub.Section) and getattr(item[0], 'href', None):
+                    # Sections themselves don't strictly require uid, but their children might
+                    pass
+                self._fix_ebooklib_toc_uids(item[1])
+
+    def process_epub(self, file_path: Path, progress=None) -> Path:
+        """
+        Reads an EPUB, extracts HTML chapters, translates/enhances the text using AI,
+        and repacks it into a new '[ENHANCED]_<filename>.epub'.
+        """
+        try:
+            # ebooklib uses print internally for some warnings, suppress standard stdout if needed, 
+            # but we'll let it be for now.
+            book = epub.read_epub(str(file_path))
+        except Exception as e:
+            raise ValueError(f"Failed to read EPUB: {e}")
+        
+        items = list(book.get_items_of_type(ebooklib.ITEM_DOCUMENT))
+        
+        task = None
+        if progress:
+            task = progress.add_task(f"Enhancing {file_path.name}...", total=len(items))
+
+        for item in items:
+            content = item.get_content()
+            soup = BeautifulSoup(content, 'html.parser')
+            
+            # Extract text
+            text = soup.get_text(separator='\n')
+            
+            # Skip very short fragments like title pages or empty TOC items
+            if len(text.strip()) < 100:
+                if progress and task is not None:
+                    progress.advance(task)
+                continue
+                
+            # Enhance content via AI
+            enhanced_md = self.ai_client.enhance_content(text)
+            
+            # Convert the returned Markdown into HTML
+            enhanced_html = markdown.markdown(enhanced_md)
+            
+            # Replace the body content
+            if soup.body:
+                soup.body.clear()
+                soup.body.append(BeautifulSoup(enhanced_html, 'html.parser'))
+            else:
+                # If no body, just wrap it
+                soup = BeautifulSoup(f"<html><body>{enhanced_html}</body></html>", 'html.parser')
+            
+            # Ensure the item retains its original ID when saving back
+            original_id = item.id
+            item.set_content(str(soup).encode('utf-8'))
+            if original_id:
+                item.id = original_id
+            
+            if progress and task is not None:
+                progress.advance(task)
+                
+        # Fix missing UIDs caused by ebooklib's read parsing before saving back
+        self._fix_ebooklib_toc_uids(book.toc)
+                
+        output_path = file_path.with_name(f"[ENHANCED]_{file_path.name}")
+        epub.write_epub(str(output_path), book, {})
+        return output_path
+import typer
+import os
+import datetime
+import logging
+from typing import Optional
+from pathlib import Path
+from rich.console import Console
+from rich.prompt import Prompt, Confirm
+from rich.panel import Panel
+from app.usb_detector import KindleDetector
+from app.organizer import KindleOrganizer
+from app.metadata import MetadataExtractor
+from app.ai_client import AIClient
+from app.config import ButlerConfig
+from app.content_processor import ContentProcessor
+
+# Setup basic logging
+logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
+logger = logging.getLogger(__name__)
+
+app = typer.Typer(help="Kindle Butler: Your smart Kindle manager.")
+console = Console()
+__version__ = "1.0.0"
+
+def get_log_path(kindle_root: str) -> Path:
+    return Path(kindle_root) / "butler_run.log"
+
+def log_to_kindle(kindle_root: str, message: str):
+    log_path = get_log_path(kindle_root)
+    timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    with open(log_path, "a", encoding="utf-8") as f:
+        f.write(f"[{timestamp}] {message}\n")
+
+def version_callback(value: bool):
+    if value:
+        console.print(f"Kindle Butler version: {__version__}")
+        raise typer.Exit()
+
+@app.callback()
+def main(
+    version: Optional[bool] = typer.Option(
+        None, "--version", callback=version_callback, is_eager=True, help="Show version and exit."
+    ),
+):
+    pass
+
+@app.command()
+def check():
+    """
+    Check system health and Kindle connection.
+    """
+    console.print("\n🔍 [bold]Kontrola systému...[/bold]")
+    config = ButlerConfig()
+    
+    # Check LLM Key
+    if config.get_env("LLM_API_KEY"):
+        console.print("✅ LLM API Key nalezen.")
+    else:
+        console.print("⚠️ [yellow]LLM API Key nebyl nalezen. AI funkce nebudou dostupné.[/yellow]")
+
+    # Check Kindle
+    detector = KindleDetector()
+    kindle_path = detector.find_kindle_path()
+    if kindle_path:
+        console.print(f"✅ Kindle nalezen v: {kindle_path}")
+    else:
+        console.print("❌ [red]Kindle nebyl nalezen.[/red]")
+
+@app.command()
+def start():
+    """
+    Main interactive entry point for Kindle Butler.
+    """
+    console.print(Panel.fit("🚀 [bold blue]Kindle Butler v1.0[/bold blue]\n[italic]Your smart librarian is ready.[/italic]", title="Welcome"))
+    
+    config = ButlerConfig()
+    current_cfg = config.load()
+    
+    # 1. Onboarding / Config Check
+    if not current_cfg.get("provider") or not config.get_env("LLM_API_KEY"):
+        console.print("\n[yellow]Looks like it's your first time or config is missing.[/yellow]")
+        provider = Prompt.ask("Kterého LLM providera chcete použít?", choices=["Gemini", "OpenAI"], default="Gemini")
+        
+        # In a real app, we'd support OAuth here. For now, API Key.
+        auth_method = "API Key"
+        api_key = Prompt.ask(f"Vložte svůj {provider} API Key", password=True)
+        
+        # Test Connection
+        console.print(f"🔄 Testování spojení s {provider}...")
+        client = AIClient(api_key=api_key) 
+        test_res = client.normalize_metadata("Test Author", "Test Title")
+        
+        if test_res.get("author"):
+            console.print("✅ [green]LLM ověření proběhlo úspěšně![/green]")
+            config.save({"provider": provider, "auth_method": auth_method})
+            config.set_env("LLM_API_KEY", api_key)
+            config.set_env("GEMINI_API_KEY", api_key)
+        else:
+            console.print("❌ [red]Chyba při ověřování LLM. Zkontrolujte klíč.[/red]")
+            raise typer.Exit(code=1)
+
+    # 2. Action Choice
+    action = Prompt.ask(
+        "\nCo budeme dnes dělat?",
+        choices=["uklidit", "importovat", "konec"],
+        default="uklidit"
+    )
+    
+    if action == "uklidit":
+        sync()
+    elif action == "importovat":
+        import_docs()
+    else:
+        console.print("👋 Měj se, Milhy!")
+
+@app.command()
+def sync(
+    auto: bool = typer.Option(False, "--auto", help="Automatický režim bez dotazů."),
+    use_ai: bool = typer.Option(True, "--use-ai/--no-use-ai", help="Použít AI pro metadata."),
+    backup: bool = typer.Option(True, help="Vytvořit zálohu před přesunem.")
+):
+    """
+    Sync and organize Kindle documents.
+    """
+    console.print("🔍 [bold]Sync Start[/bold]")
+    kindle_path = os.environ.get("KINDLE_BUTLER_MOCK_PATH")
+    if not kindle_path:
+        detector = KindleDetector()
+        kindle_path = detector.find_kindle_path()
+
+    if not kindle_path:
+        console.print("❌ [red]Kindle nebyl nalezen.[/red]")
+        if auto:
+            raise typer.Exit(code=1)
+        return
+
+    console.print(f"📍 [blue]Kindle nalezen v:[/blue] {kindle_path}")
+    log_to_kindle(kindle_path, f"Butler Smart Sync Start (auto={auto}, use_ai={use_ai}, backup={backup})")
+    
+    extractor = MetadataExtractor()
+    cfg = ButlerConfig()
+    
+    # AI client is only needed if use_ai is True
+    ai_client = None
+    if use_ai:
+        api_key = cfg.get_env("LLM_API_KEY")
+        if api_key:
+            ai_client = AIClient(api_key=api_key)
+        else:
+            console.print("⚠️ [yellow]AI klíč nenalezen, pokračuji bez AI.[/yellow]")
+            use_ai = False
+
+    organizer = KindleOrganizer(kindle_path)
+    
+    files = organizer.scan_documents()
+    if not files:
+        console.print("📭 [yellow]Žádné nové dokumenty k uklizení.[/yellow]")
+        return
+
+    console.print(f"📦 Found {len(files)} documents. Starting organization...")
+    log_to_kindle(kindle_path, f"Found {len(files)} documents. Starting organization...")
+    
+    with console.status(f"[bold green]Uklízím {len(files)} dokumentů...") as status:
+        for file_path in files:
+            meta = extractor.extract(file_path)
+            
+            author = meta["author"]
+            title = meta["title"]
+            
+            if use_ai and ai_client:
+                normalized = ai_client.normalize_metadata(author, title)
+                author = normalized.get("author", author)
+                title = normalized.get("title", title)
+            
+            if backup:
+                organizer.create_backup(file_path)
+            
+            organizer.organize_file(file_path, author)
+            console.print(f"  ✅ [green]Uklizeno:[/green] {author} - {title}")
+            
+    console.print("\n✨ [bold]Vše je uklizeno![/bold]")
+    log_to_kindle(kindle_path, "Organization complete! Your Kindle is now tidy.")
+
+def import_docs():
+    """
+    Import documents from Host to Kindle.
+    """
+    console.print("\n📂 [bold]Import dokumentů[/bold]")
+    source_dir = Path.home() / "Downloads"
+    console.print(f"Skenuji složku [blue]{source_dir}[/blue]...")
+    
+    # Simple scanner for host
+    valid_exts = {'.pdf', '.mobi', '.azw3', '.epub', '.kfx'}
+    files_to_import = [f for f in source_dir.iterdir() if f.suffix.lower() in valid_exts]
+    
+    if not files_to_import:
+        console.print("📭 Žádné kompatibilní dokumenty v Downloads.")
+        return
+
+    for i, f in enumerate(files_to_import):
+        console.print(f" [{i}] {f.name}")
+        
+    choice = Prompt.ask("Které soubory chcete importovat? (např. 0,1,3 nebo 'vse')")
+    
+    to_move = []
+    if choice.lower() == 'vse':
+        to_move = files_to_import
+    else:
+        try:
+            indices = [int(x.strip()) for x in choice.split(",")]
+            to_move = [files_to_import[i] for i in indices]
+        except:
+            console.print("❌ Neplatná volba.")
+            return
+
+    # Find Kindle
+    detector = KindleDetector()
+    kindle_path = detector.find_kindle_path()
+    if not kindle_path:
+        console.print("❌ [red]Kindle nebyl nalezen.[/red]")
+        return
+
+    target_dir = Path(kindle_path) / "documents"
+    
+    imported_count = 0
+    with console.status("[bold green]Importuji..."):
+        import shutil
+        for f in to_move:
+            try:
+                shutil.copy2(str(f), str(target_dir / f.name))
+                console.print(f"  ➡️ [green]Importováno:[/green] {f.name}")
+                imported_count += 1
+            except Exception as e:
+                console.print(f"  ❌ [red]Chyba při importu {f.name}:[/red] {e}")
+
+    if imported_count > 0:
+        if Confirm.ask(f"\nSmazat {imported_count} původních souborů z Downloads?"):
+            for f in to_move:
+                if (target_dir / f.name).exists():
+                    f.unlink()
+            console.print("✅ Původní soubory smazány.")
+
+    console.print("\n✅ Import dokončen. Spouštím automatický úklid na Kindlu...")
+    sync()
+
+@app.command()
+def enhance(file_path: Path, target_lang: str = "cs"):
+    """
+    Vylepší a přeloží EPUB dokument pomocí AI (např. převod tabulek na plynulý text).
+    """
+    if not file_path.exists() or file_path.suffix.lower() != '.epub':
+        console.print("❌ [red]Zadaný soubor neexistuje nebo není ve formátu EPUB.[/red]")
+        raise typer.Exit(1)
+        
+    console.print(f"\n✨ [bold]AI Vylepšení obsahu[/bold] (Cíl: {target_lang})")
+    
+    cfg = ButlerConfig()
+    api_key = cfg.get_env("LLM_API_KEY")
+    if not api_key:
+        console.print("❌ [red]Chybí LLM_API_KEY pro AI vylepšení.[/red]")
+        raise typer.Exit(1)
+        
+    # Import here to avoid loading at startup if not used
+    from rich.progress import Progress
+    
+    ai_client = AIClient(api_key=api_key)
+    processor = ContentProcessor(ai_client=ai_client)
+    
+    with Progress() as progress:
+        try:
+            out_path = processor.process_epub(file_path, progress=progress)
+            console.print(f"\n✅ [bold green]Dokument úspěšně vylepšen:[/bold green] {out_path.name}")
+        except Exception as e:
+            console.print(f"\n❌ [red]Chyba při vylepšování:[/red] {e}")
+            raise typer.Exit(1)
+
+if __name__ == "__main__":
+    app()
+import pytest
+from pathlib import Path
+from unittest.mock import MagicMock, patch
+from app.content_processor import ContentProcessor
+from app.ai_client import AIClient
+import ebooklib
+from ebooklib import epub
+
+@patch("app.content_processor.epub")
+def test_process_epub(mock_epub, tmp_path):
+    # Setup mock ebook
+    mock_book = MagicMock()
+    
+    # Mock chapters
+    mock_item_short = MagicMock()
+    mock_item_short.get_content.return_value = b"<html><body><p>Short text</p></body></html>"
+    
+    mock_item_long = MagicMock()
+    # Create long text to pass the length check (> 100 chars)
+    long_text = "Data " * 50
+    mock_item_long.get_content.return_value = f"<html><body><p>{long_text}</p></body></html>".encode('utf-8')
+    
+    mock_book.get_items_of_type.return_value = [mock_item_short, mock_item_long]
+    
+    mock_epub.read_epub.return_value = mock_book
+    
+    # Mock AI Client
+    mock_ai = MagicMock(spec=AIClient)
+    mock_ai.enhance_content.return_value = "## Translated Content\n\nThis is narrative prose."
+    
+    processor = ContentProcessor(ai_client=mock_ai)
+    
+    # Test path
+    input_path = tmp_path / "test.epub"
+    
+    # Process
+    output_path = processor.process_epub(input_path)
+    
+    assert output_path.name == "[ENHANCED]_test.epub"
+    
+    # Verify ebooklib read/write calls
+    mock_epub.read_epub.assert_called_once_with(str(input_path))
+    mock_epub.write_epub.assert_called_once_with(str(output_path), mock_book, {})
+    
+    # Verify AI was called exactly once (for the long item)
+    assert mock_ai.enhance_content.call_count == 1
+    
+    # Verify short item was NOT modified
+    assert mock_item_short.set_content.call_count == 0
+    
+    # Verify long item WAS modified
+    assert mock_item_long.set_content.call_count == 1
+    
+    # Verify the modified content contains the translated text converted to HTML
+    set_content_arg = mock_item_long.set_content.call_args[0][0].decode('utf-8')
+    assert "<h2>Translated Content</h2>" in set_content_arg
+    assert "This is narrative prose." in set_content_arg
+
+@patch("app.content_processor.epub")
+def test_process_epub_read_failure(mock_epub, tmp_path):
+    mock_epub.read_epub.side_effect = Exception("Read Error")
+    
+    processor = ContentProcessor(ai_client=MagicMock())
+    with pytest.raises(ValueError, match="Failed to read EPUB: Read Error"):
+        processor.process_epub(tmp_path / "test.epub")
+
+def test_physical_epub_roundtrip_integration(tmp_path):
+    """
+    Physical E2E test without mocking ebooklib to guarantee
+    the repackaged EPUB remains structurally sound.
+    """
+    input_path = tmp_path / "real_test.epub"
+    
+    # Generate a valid EPUB
+    book = epub.EpubBook()
+    book.set_identifier("id123456")
+    book.set_title("Valid Tech Document")
+    book.set_language("en")
+    book.add_author("Test Author")
+
+    c1 = epub.EpubHtml(title='Introduction', file_name='chap_01.xhtml', lang='en')
+    c1.content = '<html><head></head><body><h1>Intro</h1><p>Short intro.</p></body></html>'
+    book.add_item(c1)
+
+    c2 = epub.EpubHtml(title='Technical Data', file_name='chap_02.xhtml', lang='en')
+    c2.content = '<html><head></head><body><h1>Data</h1><p>' + ('Long tech text to trigger AI. ' * 10) + '</p></body></html>'
+    book.add_item(c2)
+
+    book.toc = (
+        epub.Link('chap_01.xhtml', 'Introduction', 'intro'),
+        epub.Link('chap_02.xhtml', 'Technical Data', 'data')
+    )
+    book.add_item(epub.EpubNcx())
+    book.add_item(epub.EpubNav())
+    book.spine = ['nav', c1, c2]
+
+    epub.write_epub(str(input_path), book, {})
+
+    # Mock only the AI client to avoid network calls
+    mock_ai = MagicMock(spec=AIClient)
+    mock_ai.enhance_content.return_value = "## Translated Content\n\nAI generated text."
+    
+    processor = ContentProcessor(ai_client=mock_ai)
+    output_path = processor.process_epub(input_path)
+
+    # Verification: output file must exist and be readable by ebooklib
+    assert output_path.exists()
+    
+    book_out = epub.read_epub(str(output_path))
+    
+    # Extract the target chapter by file name and check for AI text
+    target_chapter = next((item for item in book_out.get_items_of_type(ebooklib.ITEM_DOCUMENT) if item.get_name() == 'chap_02.xhtml'), None)
+    assert target_chapter is not None, "Target chapter chap_02.xhtml not found in output EPUB"
+    
+    content_02 = target_chapter.get_content().decode('utf-8')
+    assert "Translated Content" in content_02
+    assert "AI generated text." in content_02
+import pytest
+from pathlib import Path
+from typer.testing import CliRunner
+from unittest.mock import patch, MagicMock
+from app.main import app
+import os
+
+runner = CliRunner()
+
+@patch("app.main.ContentProcessor")
+@patch("app.main.ButlerConfig")
+def test_enhance_command(mock_config_class, mock_processor_class, tmp_path):
+    # Setup mock config
+    mock_config = MagicMock()
+    mock_config.get_env.return_value = "fake-key"
+    mock_config_class.return_value = mock_config
+
+    # Setup mock processor
+    mock_processor = MagicMock()
+    mock_processor_class.return_value = mock_processor
+    mock_processor.process_epub.return_value = tmp_path / "[ENHANCED]_test.epub"
+
+    # Create dummy epub file
+    dummy_epub = tmp_path / "test.epub"
+    dummy_epub.touch()
+
+    # Run command
+    result = runner.invoke(app, ["enhance", str(dummy_epub), "--target-lang", "en"])
+    
+    assert result.exit_code == 0
+    assert "AI Vylepšení obsahu" in result.stdout
+    assert "Dokument úspěšně vylepšen" in result.stdout
+
+def test_enhance_missing_file():
+    result = runner.invoke(app, ["enhance", "nonexistent.epub"])
+    assert result.exit_code == 1
+    assert "Zadaný soubor neexistuje nebo není ve formátu EPUB" in result.stdout
+
+@patch("app.main.ButlerConfig")
+def test_enhance_missing_api_key(mock_config_class, tmp_path):
+    mock_config = MagicMock()
+    mock_config.get_env.return_value = None
+    mock_config_class.return_value = mock_config
+
+    dummy_epub = tmp_path / "test.epub"
+    dummy_epub.touch()
+
+    result = runner.invoke(app, ["enhance", str(dummy_epub)])
+    assert result.exit_code == 1
+    assert "Chybí LLM_API_KEY pro AI vylepšení" in result.stdout

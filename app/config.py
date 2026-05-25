@@ -17,10 +17,23 @@ class ButlerConfig:
         self.config_dir.mkdir(parents=True, exist_ok=True)
 
     def load(self) -> Dict[str, Any]:
+        default_config = {
+            "provider": None,
+            "auth_method": None,
+            "smtp_server": "smtp.gmail.com",
+            "smtp_port": 587,
+            "kindle_email": None,
+            "smtp_user": None,
+            "smtp_pass": None
+        }
         if self.config_file.exists():
             with open(self.config_file, "r") as f:
-                return json.load(f)
-        return {"provider": None, "auth_method": None}
+                data = json.load(f)
+                # Merge defaults for backward compatibility
+                for k, v in default_config.items():
+                    data.setdefault(k, v)
+                return data
+        return default_config
 
     def save(self, config: Dict[str, Any]):
         with open(self.config_file, "w") as f:

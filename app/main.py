@@ -115,7 +115,7 @@ def start():
     # 2. Action Choice
     action = Prompt.ask(
         "\nCo budeme dnes dělat?",
-        choices=["uklidit", "importovat", "konec"],
+        choices=["uklidit", "importovat", "odeslat emailem", "konec"],
         default="uklidit"
     )
     
@@ -123,6 +123,8 @@ def start():
         sync(auto=False, use_ai=True, backup=True)
     elif action == "importovat":
         import_docs()
+    elif action == "odeslat emailem":
+        email_docs()
     else:
         console.print("👋 Měj se, Milhy!")
 
@@ -211,6 +213,108 @@ def sync(
     """
     _perform_sync(auto, use_ai, backup)
 
+def email_docs():
+    """
+    Send documents via email to Kindle.
+    """
+    console.print("\n📧 [bold]Odeslat dokumenty emailem na Kindle[/bold]")
+    config = ButlerConfig()
+    current_cfg = config.load()
+
+    # Ensure config and credentials
+    kindle_email = current_cfg.get("kindle_email")
+    if not kindle_email:
+        kindle_email = Prompt.ask("Zadejte svůj cílový Kindle email (např. user@kindle.com)")
+        current_cfg["kindle_email"] = kindle_email
+        config.save(current_cfg)
+
+    smtp_user = current_cfg.get("smtp_user") or config.get_env("SMTP_USER")
+    smtp_pass = current_cfg.get("smtp_pass") or config.get_env("SMTP_PASS")
+    if not smtp_user or not smtp_pass:
+        console.print("[yellow]Je potřeba nastavit SMTP přihlašovací údaje (odesílatel).[/yellow]")
+        smtp_user = Prompt.ask("Zadejte svůj odesílací email (např. user@gmail.com)")
+        smtp_pass = Prompt.ask("Zadejte své heslo (nebo aplikační heslo)", password=True)
+        current_cfg["smtp_user"] = smtp_user
+        current_cfg["smtp_pass"] = smtp_pass
+        config.save(current_cfg)
+        config.set_env("SMTP_USER", smtp_user)
+        config.set_env("SMTP_PASS", smtp_pass)
+
+    source_dir = Path.home() / "Downloads"
+    if not source_dir.exists():
+        console.print(f"⚠️ [yellow]Složka {source_dir} nebyla nalezena.[/yellow]")
+        return
+
+    console.print(f"Skenuji složku [blue]{source_dir}[/blue]...")
+    valid_exts = {'.pdf', '.mobi', '.azw3', '.epub', '.kfx'}
+    files_to_email = [f for f in source_dir.iterdir() if f.suffix.lower() in valid_exts]
+
+    if not files_to_email:
+        console.print("📭 Žádné kompatibilní dokumenty v Downloads k odeslání.")
+        return
+
+    for i, f in enumerate(files_to_email):
+        console.print(f" [{i}] {f.name}")
+
+    choice = Prompt.ask("Které soubory chcete odeslat? (např. 0,1,3 nebo 'vse')")
+
+    to_send = []
+    if choice.lower() == 'vse':
+        to_send = files_to_email
+    else:
+        try:
+            indices = [int(x.strip()) for x in choice.split(",")]
+            to_send = [files_to_email[i] for i in indices]
+        except:
+            console.print("❌ Neplatná volba.")
+            return
+
+    import smtplib
+    from email.message import EmailMessage
+    import mimetypes
+
+    smtp_server = current_cfg.get("smtp_server", "smtp.gmail.com")
+    smtp_port = current_cfg.get("smtp_port", 587)
+
+    successfully_sent = []
+    with console.status(f"[bold green]Odesílám {len(to_send)} dokumentů na {kindle_email}..."):
+        try:
+            with smtplib.SMTP(smtp_server, smtp_port) as server:
+                server.starttls()
+                server.login(smtp_user, smtp_pass)
+
+                for f in to_send:
+                    try:
+                        msg = EmailMessage()
+                        msg['Subject'] = 'Kindle Butler Delivery'
+                        msg['From'] = smtp_user
+                        msg['To'] = kindle_email
+                        msg.set_content("Sent via Kindle Butler.")
+
+                        ctype, encoding = mimetypes.guess_type(str(f))
+                        if ctype is None or encoding is not None:
+                            ctype = 'application/octet-stream'
+                        maintype, subtype = ctype.split('/', 1)
+
+                        with open(f, 'rb') as fp:
+                            msg.add_attachment(fp.read(), maintype=maintype, subtype=subtype, filename=f.name)
+
+                        server.send_message(msg)
+                        console.print(f"  ➡️ [green]Odesláno:[/green] {f.name}")
+                        successfully_sent.append(f)
+                    except Exception as e:
+                        console.print(f"  ❌ [red]Chyba při odesílání {f.name}:[/red] {e}")
+        except Exception as e:
+            console.print(f"❌ [red]Chyba při spojení se SMTP serverem:[/red] {e}")
+            return
+
+    if successfully_sent:
+        if Confirm.ask(f"\nSmazat {len(successfully_sent)} odeslaných souborů z Downloads?"):
+            for f in successfully_sent:
+                f.unlink()
+            console.print("✅ Původní soubory smazány.")
+
+
 def import_docs():
     """
     Import documents from Host to Kindle.
@@ -284,6 +388,13 @@ def import_docs():
 
     console.print("\n✅ Import dokončen. Spouštím automatický úklid na Kindlu...")
     _perform_sync(auto=False, use_ai=True, backup=True)
+
+@app.command()
+def email():
+    """
+    Spustí proces odeslání dokumentů na Kindle přes email.
+    """
+    email_docs()
 
 @app.command()
 def enhance(file_path: Path, target_lang: str = "cs"):

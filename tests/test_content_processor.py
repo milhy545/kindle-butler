@@ -115,3 +115,40 @@ def test_physical_epub_roundtrip_integration(tmp_path):
     content_02 = target_chapter.get_content().decode('utf-8')
     assert "Translated Content" in content_02
     assert "AI generated text." in content_02
+
+
+@patch("app.content_processor.epub")
+def test_process_epub_skips_failed_ai_enhancement(mock_epub, tmp_path):
+    mock_book = MagicMock()
+    mock_item = MagicMock()
+    mock_item.get_content.return_value = ("<html><body><p>" + ("Data " * 50) + "</p></body></html>").encode("utf-8")
+    mock_book.get_items_of_type.return_value = [mock_item]
+    mock_epub.read_epub.return_value = mock_book
+
+    mock_ai = MagicMock(spec=AIClient)
+    mock_ai.enhance_content.return_value = None
+
+    output_path = ContentProcessor(ai_client=mock_ai).process_epub(tmp_path / "test.epub")
+
+    assert output_path.name == "[ENHANCED]_test.epub"
+    mock_item.set_content.assert_not_called()
+    mock_epub.write_epub.assert_called_once()
+
+
+@patch("app.content_processor.epub")
+def test_process_epub_strips_unsafe_ai_html(mock_epub, tmp_path):
+    mock_book = MagicMock()
+    mock_item = MagicMock()
+    mock_item.get_content.return_value = ("<html><body><p>" + ("Data " * 50) + "</p></body></html>").encode("utf-8")
+    mock_book.get_items_of_type.return_value = [mock_item]
+    mock_epub.read_epub.return_value = mock_book
+
+    mock_ai = MagicMock(spec=AIClient)
+    mock_ai.enhance_content.return_value = "## Safe\n\n<script>alert(1)</script><p onclick='bad()'>keep</p>"
+
+    ContentProcessor(ai_client=mock_ai).process_epub(tmp_path / "test.epub")
+
+    rendered = mock_item.set_content.call_args.args[0].decode("utf-8")
+    assert "<script" not in rendered
+    assert "onclick" not in rendered
+    assert "keep" in rendered

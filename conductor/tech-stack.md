@@ -10,7 +10,7 @@
 - **pyudev**: USB device detection on Linux.
 - **google-genai**: Gemini AI integration for metadata normalization.
 - **BeautifulSoup4 / EbookLib**: Metadata extraction for EPUB.
-- **PyPDF2**: Metadata extraction for PDF.
+- **pypdf**: Metadata extraction for PDF (migrated from PyPDF2 for security).
 - **mobi-python**: Metadata extraction for MOBI/AZW3.
 - **pytest**: Test suite.
 - **pytest-cov**: Coverage reporting.

@@ -16,7 +16,7 @@ def test_mobi_extraction_mocked():
 
 def test_pdf_extraction_empty():
     extractor = MetadataExtractor()
-    with patch('PyPDF2.PdfReader') as mock_reader:
+    with patch('pypdf.PdfReader') as mock_reader:
         mock_reader.return_value.metadata = None
         res = extractor._extract_pdf(MagicMock())
         assert res == {}

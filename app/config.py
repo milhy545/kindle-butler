@@ -12,6 +12,7 @@ class ButlerConfig:
         self.config_file = self.config_dir / "config.json"
         self.env_file = self.config_dir / "env"
         self._ensure_dir()
+        self.secret_keys = {"smtp_user", "smtp_pass", "llm_api_key", "gemini_api_key"}
 
     def _ensure_dir(self):
         self.config_dir.mkdir(parents=True, exist_ok=True)
@@ -24,7 +25,8 @@ class ButlerConfig:
             "smtp_port": 587,
             "kindle_email": None,
             "smtp_user": None,
-            "smtp_pass": None
+            # Placeholder key only; real secret values are stored in env.
+            "smtp_pass": None  # nosec B105
         }
         if self.config_file.exists():
             with open(self.config_file, "r") as f:
@@ -36,8 +38,14 @@ class ButlerConfig:
         return default_config
 
     def save(self, config: Dict[str, Any]):
-        with open(self.config_file, "w") as f:
-            json.dump(config, f, indent=2)
+        public_config = {
+            key: value
+            for key, value in config.items()
+            if key.lower() not in self.secret_keys
+        }
+        with open(self.config_file, "w", encoding="utf-8") as f:
+            json.dump(public_config, f, indent=2)
+        self.config_file.chmod(0o600)
 
     def set_env(self, key: str, value: str):
         # We store the actual secrets in the env file

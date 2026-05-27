@@ -13,3 +13,20 @@ wheels/
 .coverage
 .pytest_cache/
 htmlcov/
+
+# Local Kindle/device artefacts
+backups/
+sync_stage/
+/jailbreak/
+*.azw3
+*.mobi
+*.kfx
+
+# Local generated reports and snapshots
+PROJECT_SUMMARY.md
+AUDIT_REPORT*.md
+snapshots_index.html
+.antigravitycli/
+node_modules/
+package.json
+package-lock.json

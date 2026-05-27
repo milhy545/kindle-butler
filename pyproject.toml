@@ -1,17 +1,19 @@
 [project]
 name = "kindle-butler"
-version = "0.1.0"
+version = "1.0.0"
 description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
+    "bandit>=1.9.4",
     "beautifulsoup4>=4.14.3",
     "ebooklib>=0.20",
     "google-genai>=2.6.0",
     "markdown>=3.10.2",
     "mobi-python>=0.0.1",
+    "pip-audit>=2.10.0",
     "psutil>=7.2.2",
-    "pypdf2>=3.0.1",
+    "pypdf>=3.9.0",
     "pytest>=9.0.3",
     "pytest-cov>=7.1.0",
     "pyudev>=0.24.4",

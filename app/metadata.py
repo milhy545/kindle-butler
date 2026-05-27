@@ -27,17 +27,17 @@ class MetadataExtractor:
         return metadata
 
     def _extract_pdf(self, file_path: Path) -> Dict[str, str]:
-        import PyPDF2
+        import pypdf
         info = {}
         try:
             with open(file_path, "rb") as f:
-                reader = PyPDF2.PdfReader(f)
+                reader = pypdf.PdfReader(f)
                 meta = reader.metadata
                 if meta:
-                    if '/Author' in meta:
-                        info["author"] = meta['/Author']
-                    if '/Title' in meta:
-                        info["title"] = meta['/Title']
+                    if meta.author:
+                        info["author"] = str(meta.author)
+                    if meta.title:
+                        info["title"] = str(meta.title)
         except Exception as e:
             logger.debug(f"PDF extraction failed for {file_path}: {e}")
         return info

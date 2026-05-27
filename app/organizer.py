@@ -39,6 +39,28 @@ class KindleOrganizer:
         # Limit length to 100 chars
         return name[:100]
 
+    def _backup_name(self, path: Path, *, is_dir: bool = False) -> str:
+        path_hash = hashlib.sha256(str(path).encode()).hexdigest()[:8]
+        if is_dir:
+            hasher = hashlib.sha256()
+            for child in sorted(path.rglob("*")):
+                relative = child.relative_to(path)
+                hasher.update(str(relative).encode())
+                if child.is_file():
+                    hasher.update(child.read_bytes())
+            content_hash = hasher.hexdigest()[:8]
+        else:
+            content_hash = hashlib.sha256(path.read_bytes()).hexdigest()[:8]
+        return f"{path_hash}_{content_hash}_{path.name}"
+
+    def _copy_backup_dir(self, folder_path: Path) -> Path:
+        self.backup_path.mkdir(parents=True, exist_ok=True)
+        target_backup = self.backup_path / self._backup_name(folder_path, is_dir=True)
+        if target_backup.exists():
+            shutil.rmtree(str(target_backup))
+        shutil.copytree(str(folder_path), str(target_backup))
+        return target_backup
+
     def scan_documents(self) -> List[Path]:
         """
         Recursively scans the documents folder for ebook files.
@@ -56,9 +78,9 @@ class KindleOrganizer:
         """
         self.backup_path.mkdir(parents=True, exist_ok=True)
         
-        # Create a unique but readable filename
-        path_hash = hashlib.sha256(str(file_path).encode()).hexdigest()[:8]
-        safe_name = f"{path_hash}_{file_path.name}"
+        # Include path and content hashes to keep backups readable without
+        # overwriting different versions of the same source path.
+        safe_name = self._backup_name(file_path)
         
         target_backup = self.backup_path / safe_name
         shutil.copy2(str(file_path), str(target_backup))
@@ -71,10 +93,7 @@ class KindleOrganizer:
         ]
         for sdr_folder in sdr_variants:
             if sdr_folder.exists() and sdr_folder.is_dir():
-                target_sdr = self.backup_path / f"{path_hash}_{sdr_folder.name}"
-                if target_sdr.exists():
-                    shutil.rmtree(str(target_sdr))
-                shutil.copytree(str(sdr_folder), str(target_sdr))
+                self._copy_backup_dir(sdr_folder)
             
         return target_backup
 
@@ -114,5 +133,6 @@ class KindleOrganizer:
             if sdr_folder.exists() and sdr_folder.is_dir():
                 target_sdr = target_path.parent / sdr_folder.name
                 if target_sdr.exists():
+                    self._copy_backup_dir(target_sdr)
                     shutil.rmtree(str(target_sdr))
                 shutil.move(str(sdr_folder), str(target_sdr))

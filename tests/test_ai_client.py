@@ -21,7 +21,7 @@ def test_enhance_content(mock_genai_client_class):
     
     # Verify the config was passed correctly
     call_kwargs = mock_client_instance.models.generate_content.call_args.kwargs
-    assert call_kwargs['model'] == 'gemini-1.5-flash'
+    assert call_kwargs['model'] == 'gemini-2.5-flash'
     assert call_kwargs['contents'] == '- A: 1'
     
     config = call_kwargs['config']
@@ -32,7 +32,7 @@ def test_enhance_content_no_client():
     client.client = None # Force none just in case env var is set
     
     result = client.enhance_content("- A: 1")
-    assert result == "- A: 1"
+    assert result is None
 
 @patch("app.ai_client.genai.Client")
 def test_enhance_content_exception(mock_genai_client_class):
@@ -43,5 +43,5 @@ def test_enhance_content_exception(mock_genai_client_class):
     client = AIClient(api_key="fake-key")
     result = client.enhance_content("Raw text", target_lang="cs")
     
-    # Should fallback to original text on exception
-    assert result == "Raw text"
+    # Should return None on exception
+    assert result is None

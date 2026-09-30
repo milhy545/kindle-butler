@@ -11,18 +11,24 @@
 - **Testing:** Run tests using `uv run python -m pytest`.
 - **Security:** Use SHA-256 for hashes, sanitize all path components derived from external metadata or AI output.
 
-## [FORAI] Cross-Agent Verification Hook (Codex)
-Tento hook definuje povinný proces křížové kontroly implementace pomocí OpenAI Codex (přes Desktop Commander).
+## [FORAI] Tandem Cross-Agent Verification Hook (Mistral & MiMo)
+Tento hook definuje povinný proces křížové kontroly implementace celého projektu pomocí tandemu **Mistral Large** (`mistral/mistral-large-latest`) a **MiMo** (`opencode/mimo-v2.5-free`).
 
 ### 🔄 Workflow: Validation Phase Override
-V momentě, kdy považuješ úkol za dokončený (před finálním hlášením uživateli), MUSÍŠ provést následující kroky:
-1. **Spuštění Codexu:** Použij `start_process("codex-cli")` nebo `codex` (podle dostupnosti v PATH).
-2. **Zaslání kontextu:** Pomocí `interact_with_process` pošli Codexu zprávu: "Proveď revizi mých posledních změn v [seznam souborů nebo diff]. Hledej logické chyby, bezpečnostní rizika nebo porušení lokálních konvencí. Pokud je vše v pořádku, odpověz přesně 'VERIFIED_OK'. Pokud najdeš chyby, vypiš je v bodech."
-3. **Analýza výstupu:**
-   - Pokud Codex odpoví `VERIFIED_OK`, můžeš úkol uzavřít.
-   - Pokud Codex vypíše chyby, proveď opravu podle jeho doporučení.
-4. **Iterace:** Po opravě znovu zavolej Codex pro finální potvrzení. Opakuj, dokud nedostaneš `VERIFIED_OK`.
+V momentě, kdy považuješ jakoukoliv vývojovou fázi za dokončenou, **NESMÍŠ** hned ohlásit hotovo uživateli. Musíš striktně provést toto pětikrokové tandemové workflow:
+
+1. **Fáze A: Individuální audit celého projektu**
+   - Vyžeň **Mistral Large** a **Mimo** (odděleně) na pastvu. Požádej je o kompletní revizi **celého projektu** (nejen posledních úprav). Hledají logické chyby, bezpečnostní rizika (SSRF, path traversal) a soulad s lokálními konvencemi.
+2. **Fáze B: Porovnání a Diskuse (Konsensus)**
+   - Nech oba modely porovnat své nálezy, prodiskutovat nejvhodnější nápravu a dohodnout se na jednotném, bezpečném postupu oprav.
+3. **Fáze C: Bačova revize a Onboarding**
+   - Obdržíš od nich společný report: Co přesně našli a jak to plánují opravit.
+   - **Tvoje povinnost:** Pečlivě si report prostuduj, pochop příčinu chyb, abys je příště zachytil sám ještě před jejich kontrolou.
+4. **Fáze D: Zelená k bezpečnému fixu**
+   - Pokud je jejich plánovaný postup bezpečný a zachovává integritu projektu, dej jim zelenou k provedení oprav.
+5. **Fáze E: Finální verifikace**
+   - Počkej, až opravy provedou. Ověř, že vše proběhlo přesně podle schváleného plánu, a spusť unit testy (`uv run python -m pytest`). Teprve při 100% úspěchu se můžeš ozvat Milhymu, že je hotovo.
 
 ### 🛠 Technické detaily
-- Pro čtení výsledku z Codexu používej `read_process_output` s negativním offsetem pro získání posledních řádků.
-- Pokud je Codex v perzistentním REPL režimu, neukončuj proces, dokud není celá session uzavřena.
+- Spouštěj modely přes `pi` CLI (nebo wrapper `agy`).
+- Ujisti se, že pro vysoce kontextovou analýzu celého projektu využíváš **Mimo** s jejím 1M kontextovým oknem.

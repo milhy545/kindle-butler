@@ -26,7 +26,10 @@ class ButlerConfig:
             "kindle_email": None,
             "smtp_user": None,
             # Placeholder key only; real secret values are stored in env.
-            "smtp_pass": None  # nosec B105
+            "smtp_pass": None,  # nosec B105
+            "ollama_host": "http://localhost:11434",
+            "ollama_metadata_model": "qwen2.5:3b",
+            "ollama_enhance_model": "mistral:7b"
         }
         if self.config_file.exists():
             with open(self.config_file, "r") as f:
@@ -34,7 +37,19 @@ class ButlerConfig:
                 # Merge defaults for backward compatibility
                 for k, v in default_config.items():
                     data.setdefault(k, v)
+                
+                # Propagate config to environments for AI client
+                for key in ["ollama_host", "ollama_metadata_model", "ollama_enhance_model"]:
+                    env_key = f"KINDLE_BUTLER_{key.upper()}"
+                    if env_key not in os.environ and data.get(key):
+                        os.environ[env_key] = str(data[key])
                 return data
+        
+        # If config doesn't exist, propagate defaults
+        for key in ["ollama_host", "ollama_metadata_model", "ollama_enhance_model"]:
+            env_key = f"KINDLE_BUTLER_{key.upper()}"
+            if env_key not in os.environ:
+                os.environ[env_key] = default_config[key]
         return default_config
 
     def save(self, config: Dict[str, Any]):
@@ -67,9 +82,11 @@ class ButlerConfig:
         if not updated:
             new_lines.append(f"{key}={value}\n")
             
-        with open(self.env_file, "w") as f:
+        # Secure file creation with 0600 mode from the start to prevent race conditions
+        flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
+        fd = os.open(self.env_file, flags, 0o600)
+        with os.fdopen(fd, "w") as f:
             f.writelines(new_lines)
-        self.env_file.chmod(0o600)
 
     def get_env(self, key: str) -> Optional[str]:
         if not self.env_file.exists():

@@ -477,7 +477,7 @@ def process(source: Path, title: str = "Unknown", author: str = "Milhy Butler", 
 
 @app.command()
 def sync_wifi(
-    ip: str = typer.Argument("192.168.0.59", help="Kindle SSH host or IP address."),
+    ip: str = typer.Argument("192.168.0.58", help="Kindle SSH host or IP address."),
     delete: bool = typer.Option(False, "--delete", help="Delete remote files missing from the local sync stage."),
 ):
     """Sync staged files to Kindle and trigger library scan."""
@@ -496,7 +496,7 @@ def sync_wifi(
         raise typer.Exit(1)
 
     remote = f"root@{remote_host}"
-    ssh_base = ["ssh", "-i", str(ssh_key), remote]
+    ssh_base = ["ssh", "-i", str(ssh_key), "-p", "2222", remote]
 
     try:
         subprocess.run(  # nosec B603
@@ -509,7 +509,7 @@ def sync_wifi(
 
     rsync_cmd = [
         "rsync", "-rtvz", "--no-p", "--no-g", "--no-o", "--delete",
-        "-e", f"ssh -i {ssh_key}",
+        "-e", f"ssh -i {ssh_key} -p 2222",
         str(source_dir) + "/",
         f"{remote}:/mnt/us/documents/Butler/"
     ]
